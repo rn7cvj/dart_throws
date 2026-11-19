@@ -1,0 +1,15 @@
+name: dart_throws
+description: Checked exception contracts for Dart functions and methods.
+version: 1.0.0
+repository: https://github.com/rn7cvj/dart_throws
+
+environment:
+  sdk: ^3.13.1
+
+dependencies:
+  analysis_server_plugin: ^0.3.26
+  analyzer: ^14.7.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6

@@ -59,6 +59,36 @@ void invalidThrow() => throw 'unexpected';
     expect(reports, ['forward()', "throw 'unexpected'"]);
   });
 
+  const configuredCalls = '''
+@Throws(exceptions: [FormatException])
+void annotated() => throw const FormatException();
+
+@NonThrows
+int check() {
+  annotated();
+  return int.parse('invalid');
+}
+
+@NonThrows
+void explicitThrow() => throw 'unexpected';
+''';
+
+  test('non_throws assumes safety for unannotated calls only', () async {
+    final reports = await _analyze(configuredCalls, unannotated: 'non_throws');
+    expect(reports, ['annotated()', "throw 'unexpected'"]);
+  });
+
+  for (final mode in ['throws', 'invalid']) {
+    test('$mode treats unannotated calls as potentially throwing', () async {
+      final reports = await _analyze(configuredCalls, unannotated: mode);
+      expect(reports, [
+        'annotated()',
+        "int.parse('invalid')",
+        "throw 'unexpected'",
+      ]);
+    });
+  }
+
   test(
     'catch and finally bodies are protected only by outer handlers',
     () async {
@@ -144,7 +174,7 @@ void check() {
   });
 }
 
-Future<List<String>> _analyze(String source) async {
+Future<List<String>> _analyze(String source, {String? unannotated}) async {
   final contents = "import 'package:dart_throws/dart_throws.dart';\n$source";
   final resources = OverlayResourceProvider(PhysicalResourceProvider.INSTANCE);
   final path = resources.pathContext.join(
@@ -153,6 +183,16 @@ Future<List<String>> _analyze(String source) async {
     'contract_fixture.dart',
   );
   resources.setOverlay(path, content: contents, modificationStamp: 0);
+  if (unannotated != null) {
+    resources.setOverlay(
+      resources.pathContext.join(
+        resources.pathContext.dirname(path),
+        'analysis_options.yaml',
+      ),
+      content: 'dart_throws:\n  unannotated: $unannotated\n',
+      modificationStamp: 0,
+    );
+  }
   final collection = AnalysisContextCollection(
     includedPaths: [path],
     resourceProvider: resources,

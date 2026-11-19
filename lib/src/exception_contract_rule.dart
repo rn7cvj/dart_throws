@@ -6,6 +6,8 @@ import 'package:analyzer/dart/ast/visitor.dart';
 import 'package:analyzer/dart/element/element.dart';
 import 'package:analyzer/dart/element/type.dart';
 import 'package:analyzer/error/error.dart';
+import 'package:analyzer/file_system/file_system.dart';
+import 'package:yaml/yaml.dart';
 
 class ExceptionContractRule extends AnalysisRule {
   static const code = LintCode(
@@ -39,13 +41,16 @@ class ExceptionContractRule extends AnalysisRule {
 class _DeclarationVisitor extends SimpleAstVisitor<void> {
   final ExceptionContractRule rule;
   final RuleContext context;
+  late final _UnannotatedPolicy _unannotatedPolicy = _readUnannotatedPolicy(
+    context.definingUnit.file,
+  );
 
   _DeclarationVisitor(this.rule, this.context);
 
   _BodyVisitor? _checker(ExecutableFragment? fragment) {
     final allowed = _declaredExceptions(fragment?.element);
     if (allowed == null) return null;
-    return _BodyVisitor(rule, context, allowed);
+    return _BodyVisitor(rule, context, allowed, _unannotatedPolicy);
   }
 
   @override
@@ -75,8 +80,9 @@ class _BodyVisitor extends RecursiveAstVisitor<void> {
   final ExceptionContractRule rule;
   final RuleContext context;
   final List<DartType> allowed;
+  final _UnannotatedPolicy unannotatedPolicy;
 
-  _BodyVisitor(this.rule, this.context, this.allowed);
+  _BodyVisitor(this.rule, this.context, this.allowed, this.unannotatedPolicy);
 
   DartType get _objectType => context.typeProvider.objectType;
 
@@ -106,7 +112,13 @@ class _BodyVisitor extends RecursiveAstVisitor<void> {
   }
 
   void checkCall(AstNode node, Element? element) {
-    final thrown = _declaredExceptions(element) ?? [_objectType];
+    final declared = _declaredExceptions(element);
+    final thrown =
+        declared ??
+        switch (unannotatedPolicy) {
+          _UnannotatedPolicy.throws => [_objectType],
+          _UnannotatedPolicy.nonThrows => const <DartType>[],
+        };
     if (thrown.isEmpty) return;
     // A catch around a Future-producing call only sees its asynchronous
     // failure when the Future is awaited before leaving the try block.
@@ -190,6 +202,41 @@ class _BodyVisitor extends RecursiveAstVisitor<void> {
   void visitRethrowExpression(RethrowExpression node) {
     final clause = node.thisOrAncestorOfType<CatchClause>();
     _check(node, [clause?.exceptionType?.type ?? _objectType]);
+  }
+}
+
+enum _UnannotatedPolicy {
+  throws('throws'),
+  nonThrows('non_throws');
+
+  const _UnannotatedPolicy(this.yamlValue);
+
+  final String yamlValue;
+}
+
+// The plugin protocol has no field for custom options. Read our top-level
+// section through the analyzer's resource provider.
+_UnannotatedPolicy _readUnannotatedPolicy(File source) {
+  var folder = source.parent;
+  while (true) {
+    final options = folder.getFile('analysis_options.yaml');
+    try {
+      if (options.exists) {
+        final yaml = loadYaml(options.readAsStringSync());
+        if (yaml case {'dart_throws': {'unannotated': final mode}}) {
+          return _UnannotatedPolicy.values.firstWhere(
+            (policy) => policy.yamlValue == mode,
+            orElse: () => _UnannotatedPolicy.throws,
+          );
+        }
+      }
+    } on YamlException {
+      return _UnannotatedPolicy.throws;
+    } on FileSystemException {
+      return _UnannotatedPolicy.throws;
+    }
+    if (folder.isRoot) return _UnannotatedPolicy.throws;
+    folder = folder.parent;
   }
 }
 

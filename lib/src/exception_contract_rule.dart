@@ -38,6 +38,53 @@ class ExceptionContractRule extends AnalysisRule {
   }
 }
 
+class UnnecessaryCatchRule extends AnalysisRule {
+  static const code = LintCode(
+    'unnecessary_catch',
+    'No exception can reach this catch under the configured exception rules.',
+    severity: DiagnosticSeverity.WARNING,
+  );
+
+  UnnecessaryCatchRule()
+    : super(
+        name: code.lowerCaseName,
+        description: 'Checks for catches around non-throwing code.',
+      );
+
+  @override
+  LintCode get diagnosticCode => code;
+
+  @override
+  void registerNodeProcessors(
+    RuleVisitorRegistry registry,
+    RuleContext context,
+  ) {
+    registry.addTryStatement(this, _TryVisitor(this, context));
+  }
+}
+
+class _TryVisitor extends SimpleAstVisitor<void> {
+  final UnnecessaryCatchRule rule;
+  final RuleContext context;
+  late final _UnannotatedPolicy _unannotatedPolicy = _readUnannotatedPolicy(
+    context.definingUnit.file,
+  );
+
+  _TryVisitor(this.rule, this.context);
+
+  @override
+  void visitTryStatement(TryStatement node) {
+    final clause = node.catchClauses.firstOrNull;
+    if (clause == null) return;
+
+    final visitor = _TryBodyVisitor(context, _unannotatedPolicy, node);
+    node.body.accept(visitor);
+    if (!visitor.mayThrow) {
+      rule.reportAtToken(clause.beginToken);
+    }
+  }
+}
+
 class _DeclarationVisitor extends SimpleAstVisitor<void> {
   final ExceptionContractRule rule;
   final RuleContext context;
@@ -76,23 +123,86 @@ class _DeclarationVisitor extends SimpleAstVisitor<void> {
   }
 }
 
-class _BodyVisitor extends RecursiveAstVisitor<void> {
+class _BodyVisitor extends _ExceptionSourceVisitor {
   final ExceptionContractRule rule;
-  final RuleContext context;
   final List<DartType> allowed;
+
+  _BodyVisitor(
+    this.rule,
+    RuleContext context,
+    this.allowed,
+    _UnannotatedPolicy unannotatedPolicy,
+  ) : super(context, unannotatedPolicy);
+
+  @override
+  void _check(AstNode node, List<DartType> thrown, {bool canCatch = true}) {
+    for (final type in thrown) {
+      if (allowed.any((handler) => _isCoveredBy(type, handler))) continue;
+      if (canCatch && _isCaught(node, type)) continue;
+      rule.reportAtNode(node, arguments: [type.getDisplayString()]);
+    }
+  }
+}
+
+class _TryBodyVisitor extends _ExceptionSourceVisitor {
+  final TryStatement statement;
+  bool mayThrow = false;
+
+  _TryBodyVisitor(super.context, super.unannotatedPolicy, this.statement);
+
+  @override
+  void _check(AstNode node, List<DartType> thrown, {bool canCatch = true}) {
+    // Calls returning a Future can still throw synchronously.
+    mayThrow =
+        mayThrow ||
+        thrown.any((type) => !_isCaught(node, type, before: statement));
+  }
+
+  @override
+  void visitAwaitExpression(AwaitExpression node) {
+    final awaited = node.expression.unParenthesized;
+    final type = awaited.staticType;
+    // Calls have their own contracts. Other Futures can carry errors from
+    // outside this try block.
+    if (awaited is! InvocationExpression &&
+        awaited is! InstanceCreationExpression &&
+        awaited is! DotShorthandConstructorInvocation &&
+        (_canCompleteLater(type) || type is DynamicType)) {
+      _check(node, [_objectType]);
+    }
+    super.visitAwaitExpression(node);
+  }
+
+  @override
+  void visitForStatement(ForStatement node) {
+    if (node.awaitKeyword != null) _check(node, [_objectType]);
+    super.visitForStatement(node);
+  }
+}
+
+abstract class _ExceptionSourceVisitor extends RecursiveAstVisitor<void> {
+  final RuleContext context;
   final _UnannotatedPolicy unannotatedPolicy;
 
-  _BodyVisitor(this.rule, this.context, this.allowed, this.unannotatedPolicy);
+  _ExceptionSourceVisitor(this.context, this.unannotatedPolicy);
 
   DartType get _objectType => context.typeProvider.objectType;
+
+  bool _canCompleteLater(DartType? type) =>
+      type?.asInstanceOf(context.typeProvider.futureElement) != null ||
+      type?.isDartAsyncFutureOr == true;
 
   bool _isCoveredBy(DartType thrown, DartType handler) =>
       context.typeSystem.isSubtypeOf(thrown, handler);
 
-  bool _isCaught(AstNode node, DartType thrown) {
+  bool _isCaught(AstNode node, DartType thrown, {TryStatement? before}) {
     for (var child = node; child.parent != null; child = child.parent!) {
       final parent = child.parent;
-      if (parent is FunctionBody || parent is ConstructorDeclaration) break;
+      if (parent == before ||
+          parent is FunctionBody ||
+          parent is ConstructorDeclaration) {
+        break;
+      }
       if (parent is! TryStatement || child != parent.body) continue;
       for (final clause in parent.catchClauses) {
         if (clause.exceptionType == null) return true;
@@ -103,13 +213,7 @@ class _BodyVisitor extends RecursiveAstVisitor<void> {
     return false;
   }
 
-  void _check(AstNode node, Iterable<DartType> thrown, {bool canCatch = true}) {
-    for (final type in thrown) {
-      if (allowed.any((handler) => _isCoveredBy(type, handler))) continue;
-      if (canCatch && _isCaught(node, type)) continue;
-      rule.reportAtNode(node, arguments: [type.getDisplayString()]);
-    }
-  }
+  void _check(AstNode node, List<DartType> thrown, {bool canCatch = true});
 
   void checkCall(AstNode node, Element? element) {
     final declared = _declaredExceptions(element);
@@ -123,9 +227,6 @@ class _BodyVisitor extends RecursiveAstVisitor<void> {
     // A catch around a Future-producing call only sees its asynchronous
     // failure when the Future is awaited before leaving the try block.
     final type = node is Expression ? node.staticType : null;
-    final canCompleteLater =
-        type?.asInstanceOf(context.typeProvider.futureElement) != null ||
-        type?.isDartAsyncFutureOr == true;
     var result = node;
     while (result.parent is ParenthesizedExpression) {
       result = result.parent!;
@@ -133,7 +234,7 @@ class _BodyVisitor extends RecursiveAstVisitor<void> {
     _check(
       node,
       thrown,
-      canCatch: !canCompleteLater || result.parent is AwaitExpression,
+      canCatch: !_canCompleteLater(type) || result.parent is AwaitExpression,
     );
   }
 

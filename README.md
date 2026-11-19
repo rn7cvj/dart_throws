@@ -23,7 +23,7 @@ dart_throws:
   unannotated: throws
 ```
 
-Run `dart pub get`, then `dart analyze`. The plugin reports `dart_throws/unhandled_exception` as a warning. Restart the Dart Analysis Server to load the plugin in an already open IDE.
+Run `dart pub get`, then `dart analyze`. Restart the Dart Analysis Server to load the plugin in an already open IDE.
 
 ## Unannotated calls
 
@@ -67,3 +67,9 @@ int parseOrDefault(String text) {
 - For a call whose static return type is `Future` or `FutureOr`, use `await` directly on the call within the `try` block. The rule does not track futures saved in variables or error handlers installed through `catchError`.
 
 The rule uses the statically resolved declaration for each call. It does not follow function aliases, verify override contracts, or model implicit Dart runtime failures.
+
+## Unnecessary catches
+
+`dart_throws/unnecessary_catch` warns on the first catch when the `try` body has no exception source that can reach its handlers. It applies in annotated and unannotated functions and uses the configured policy for unannotated calls. A call marked `@NonThrows` alone does not justify a catch. An explicit `throw`, a potentially throwing call, or awaiting a future passed in from elsewhere can justify one. Exceptions fully handled by a nested `try` do not justify an outer catch.
+
+Like the contract check, this warning does not model implicit runtime failures such as a failed null assertion.

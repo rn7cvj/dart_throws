@@ -12,5 +12,6 @@ class _DartThrowsPlugin extends Plugin {
   @override
   void register(PluginRegistry registry) {
     registry.registerWarningRule(ExceptionContractRule());
+    registry.registerWarningRule(UnnecessaryCatchRule());
   }
 }
